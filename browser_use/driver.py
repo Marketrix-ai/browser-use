@@ -50,6 +50,11 @@ class Driver:
 				raise ValueError(f'Invalid browser name: {self.config.browser_class}')
 			await self.impl.setup()
 			await self.impl.open()
+		elif self.name == 'socket':
+			from browser_use.drivers.socket import SocketBrowser
+			self.impl = SocketBrowser(self.config)
+			await self.impl.setup()
+			await self.impl.open()
 		else:
 			raise NotImplementedError(f"Driver '{self.name}' is not supported.")
 		return self
