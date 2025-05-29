@@ -1118,7 +1118,7 @@ class BrowserSession(BaseModel):
 	async def get_cookies(self) -> list[dict[str, Any]]:
 		if self.browser_context:
 			return await self.browser_context.cookies()
-		return []		
+		return []
 
 	async def save_cookies(self, *args, **kwargs) -> None:
 		"""
