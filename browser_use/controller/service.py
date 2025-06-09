@@ -117,6 +117,7 @@ class Controller(Generic[Context]):
 		# Element Interaction Actions
 		@self.registry.action('Click element by index', param_model=ClickElementAction)
 		async def click_element_by_index(params: ClickElementAction, browser: BrowserContext):
+			logger.debug(f'Click element by index: {params.index}')
 			session = await browser.get_session()
 
 			if params.index not in await browser.get_selector_map():
@@ -233,8 +234,8 @@ class Controller(Generic[Context]):
 			content = markdownify.markdownify(await page.content(), strip=strip)
 
 			# manually append iframe text into the content so it's readable by the LLM (includes cross-origin iframes)
-			for iframe in page.frames:
-				if iframe.url != page.url and not iframe.url.startswith('data:'):
+			for iframe in await page.frames:
+				if iframe._page_id != page.url and not iframe._page_id.startswith('data:'):
 					content += f'\n\nIFRAME {iframe.url}:\n'
 					content += markdownify.markdownify(await iframe.content())
 

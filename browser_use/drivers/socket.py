@@ -36,6 +36,7 @@ class SocketRequestManager:
         return await fut
 
     def _on_response(self, data):
+        logger.debug(f"Received response: {data}")
         req_id = data.get('req_id')
         if req_id and req_id in self._futures:
             fut = self._futures.pop(req_id)
@@ -55,8 +56,10 @@ class SocketBrowser(AbstractBrowser):
         url = self._config.wss_url or self._config.cdp_url
         if not url:
             raise ValueError('SocketBrowser requires wss_url or cdp_url for socket.io endpoint')
+        logger.info(f"Connecting to {url}")
         await self._sio.connect(url, transports=['websocket'])
         self._version = await self._req.emit('get_version', {})
+        logger.info(f"Browser version: {self._version}")
         return self
 
     async def open(self) -> 'SocketBrowser':
@@ -136,16 +139,17 @@ class SocketTracing(AbstractTracing):
 
 
 class SocketFrame(AbstractFrame):
-    def __init__(self, req: SocketRequestManager, frame_id: str):
+    def __init__(self, req: SocketRequestManager, frame_id: str, page_id: str):
         self._req = req
         self._frame_id = frame_id
+        self._page_id = page_id
 
     @property
     def url(self) -> str:
         return self._frame_id  # Or fetch via req if needed
 
     async def content(self) -> str:
-        return await self._req.emit('frame_content', {'frame_id': self._frame_id})
+        return await self._req.emit('frame_content', {'frame_id': self._frame_id, 'page_id': self._page_id})
 
     async def evaluate(self, script: str, *args, **kwargs) -> Any:
         return await self._req.emit('frame_evaluate', {'frame_id': self._frame_id, 'script': script, 'args': args, 'kwargs': kwargs})
@@ -154,17 +158,17 @@ class SocketFrame(AbstractFrame):
         el_id = await self._req.emit('frame_query_selector', {'frame_id': self._frame_id, 'selector': selector})
         if not el_id:
             return None
-        return SocketElementHandle(self._req, el_id)
+        return SocketElementHandle(self._req, el_id, self._page_id)
 
     async def query_selector_all(self, selector: str) -> list['SocketElementHandle']:
         el_ids = await self._req.emit('frame_query_selector_all', {'frame_id': self._frame_id, 'selector': selector})
-        return [SocketElementHandle(self._req, eid) for eid in el_ids]
+        return [SocketElementHandle(self._req, eid, self._page_id) for eid in el_ids]
 
     def locator(self, selector: str) -> 'SocketLocator':
-        return SocketLocator(self._req, self._frame_id, selector)
+        return SocketLocator(self._req, self._frame_id, selector, self._page_id)
 
     def frame_locator(self, selector: str) -> 'SocketLocator':
-        return SocketLocator(self._req, self._frame_id, selector)
+        return SocketLocator(self._req, self._frame_id, selector, self._page_id)
 
     async def click(self, *args, **kwargs):
         await self._req.emit('frame_click', {'frame_id': self._frame_id, 'args': args, 'kwargs': kwargs})
@@ -232,13 +236,26 @@ class SocketPage(Page):
         return await self._req.emit('page_content', {'page_id': self._page_id})
 
     async def screenshot(self, **kwargs) -> bytes:
-        return await self._req.emit('page_screenshot', {'page_id': self._page_id, 'kwargs': kwargs})
+        result = await self._req.emit('page_screenshot', {'page_id': self._page_id, 'kwargs': kwargs})
+        if isinstance(result, str) and result.startswith('data:image/'):
+            import base64, re
+            match = re.match(r'data:image/[^;]+;base64,(.*)', result)
+            if match:
+                return base64.b64decode(match.group(1))
+            else:
+                raise ValueError("Unexpected screenshot data URL format")
+        elif isinstance(result, (bytes, bytearray)):
+            return result
+        else:
+            raise ValueError("Unexpected screenshot result type")
 
     async def close(self):
         await self._req.emit('page_close', {'page_id': self._page_id})
 
     async def evaluate(self, script: str, *args, **kwargs):
-        return await self._req.emit('page_evaluate', {'page_id': self._page_id, 'script': script, 'args': args, 'kwargs': kwargs})
+        result = await self._req.emit('page_evaluate', {'page_id': self._page_id, 'script': script, 'args': args, 'kwargs': kwargs})
+        logger.debug(f"Evaluate result: {result}")
+        return result
 
     async def wait_for_load_state(self, state: Literal['domcontentloaded', 'load', 'networkidle'] | None = 'load', **kwargs):
         await self._req.emit('page_wait_for_load_state', {'page_id': self._page_id, 'state': state, 'kwargs': kwargs})
@@ -282,25 +299,25 @@ class SocketPage(Page):
         return await self._req.emit('page_title', {'page_id': self._page_id})
 
     @property
-    def frames(self) -> list:
-        frame_ids = asyncio.run(self._req.emit('page_frames', {'page_id': self._page_id}))
-        return [SocketFrame(self._req, fid) for fid in frame_ids]
+    async def frames(self) -> list:
+        frame_ids = await self._req.emit('page_frames', {'page_id': self._page_id})
+        return [SocketFrame(self._req, fid, self._page_id) for fid in frame_ids]
 
     async def query_selector(self, selector: str) -> 'SocketElementHandle | None':
         el_id = await self._req.emit('page_query_selector', {'page_id': self._page_id, 'selector': selector})
         if not el_id:
             return None
-        return SocketElementHandle(self._req, el_id)
+        return SocketElementHandle(self._req, el_id, self._page_id)
 
     async def query_selector_all(self, selector: str) -> list['SocketElementHandle']:
         el_ids = await self._req.emit('page_query_selector_all', {'page_id': self._page_id, 'selector': selector})
-        return [SocketElementHandle(self._req, eid) for eid in el_ids]
+        return [SocketElementHandle(self._req, eid, self._page_id) for eid in el_ids]
 
     def locator(self, selector: str) -> 'SocketLocator':
-        return SocketLocator(self._req, self._page_id, selector)
+        return SocketLocator(self._req, self._page_id, selector, self._page_id)
 
     def frame_locator(self, selector: str) -> 'SocketLocator':
-        return SocketLocator(self._req, self._page_id, selector)
+        return SocketLocator(self._req, self._page_id, selector, self._page_id)
 
     async def emulate_media(self, **kwargs) -> None:
         await self._req.emit('page_emulate_media', {'page_id': self._page_id, 'kwargs': kwargs})
@@ -309,7 +326,7 @@ class SocketPage(Page):
         return await self._req.emit('page_pdf', {'page_id': self._page_id, 'kwargs': kwargs})
 
     def get_by_text(self, text: str, exact: bool = False) -> 'SocketLocator':
-        return SocketLocator(self._req, self._page_id, f'text={text}', exact=exact)
+        return SocketLocator(self._req, self._page_id, f'text={text}', exact=exact, page_id=self._page_id)
 
     @property
     def keyboard(self) -> 'SocketKeyboard':
@@ -341,9 +358,10 @@ class SocketPage(Page):
 
 
 class SocketElementHandle(AbstractElementHandle):
-    def __init__(self, req: SocketRequestManager, el_id: str):
+    def __init__(self, req: SocketRequestManager, el_id: str, page_id: str):
         self._req = req
         self._el_id = el_id
+        self._page_id = page_id
 
     async def is_visible(self) -> bool:
         return await self._req.emit('element_is_visible', {'element_id': self._el_id})
@@ -367,11 +385,11 @@ class SocketElementHandle(AbstractElementHandle):
         el_id = await self._req.emit('element_query_selector', {'element_id': self._el_id, 'selector': selector})
         if not el_id:
             return None
-        return SocketElementHandle(self._req, el_id)
+        return SocketElementHandle(self._req, el_id, self._page_id)
 
     async def query_selector_all(self, selector: str) -> list['SocketElementHandle']:
         el_ids = await self._req.emit('element_query_selector_all', {'element_id': self._el_id, 'selector': selector})
-        return [SocketElementHandle(self._req, eid) for eid in el_ids]
+        return [SocketElementHandle(self._req, eid, self._page_id) for eid in el_ids]
 
     def on(self, event: str, handler) -> None:
         pass  # Not implemented for socket
@@ -380,13 +398,20 @@ class SocketElementHandle(AbstractElementHandle):
         pass  # Not implemented for socket
 
     async def click(self, *args, **kwargs):
-        await self._req.emit('element_click', {'element_id': self._el_id, 'args': args, 'kwargs': kwargs})
+        await self._req.emit('element_click', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'args': args,
+            'kwargs': kwargs
+        })
 
     async def get_property(self, property_name: str):
         return await self._req.emit('element_get_property', {'element_id': self._el_id, 'property_name': property_name})
 
     async def evaluate(self, script: str, *args, **kwargs):
-        return await self._req.emit('element_evaluate', {'element_id': self._el_id, 'script': script, 'args': args, 'kwargs': kwargs})
+        result = await self._req.emit('element_evaluate', {'element_id': self._el_id, 'script': script, 'args': args, 'kwargs': kwargs})
+        logger.debug(f"Evaluate result: {result}")
+        return result
 
     async def type(self, text: str, delay: float = 0) -> None:
         await self._req.emit('element_type', {'element_id': self._el_id, 'text': text, 'delay': delay})
@@ -399,11 +424,12 @@ class SocketElementHandle(AbstractElementHandle):
 
 
 class SocketLocator(AbstractLocator):
-    def __init__(self, req: SocketRequestManager, parent_id: str, selector: str, exact: bool = False):
+    def __init__(self, req: SocketRequestManager, parent_id: str, selector: str, exact: bool = False, page_id: str | None = None):
         self._req = req
         self._parent_id = parent_id
         self._selector = selector
         self._exact = exact
+        self._page_id = page_id
 
     def filter(self, **kwargs) -> 'SocketLocator':
         return SocketLocator(self._req, self._parent_id, self._selector, **kwargs)
@@ -418,30 +444,32 @@ class SocketLocator(AbstractLocator):
     def first(self) -> 'Awaitable[SocketElementHandle | None]':
         async def _first():
             el_id = await self._req.emit('locator_first', {'parent_id': self._parent_id, 'selector': self._selector, 'exact': self._exact})
-            return SocketElementHandle(self._req, el_id) if el_id else None
+            return SocketElementHandle(self._req, el_id, self._page_id) if el_id else None
         return _first()
 
     def nth(self, index: int) -> 'SocketLocator':
-        return SocketLocator(self._req, self._parent_id, self._selector, exact=self._exact)
+        return SocketLocator(self._req, self._parent_id, self._selector, exact=self._exact, page_id=self._page_id)
 
     async def select_option(self, **kwargs) -> Any:
         return await self._req.emit('locator_select_option', {'parent_id': self._parent_id, 'selector': self._selector, 'exact': self._exact, **kwargs})
 
     async def element_handle(self) -> 'SocketElementHandle | None':
         el_id = await self._req.emit('locator_element_handle', {'parent_id': self._parent_id, 'selector': self._selector, 'exact': self._exact})
-        return SocketElementHandle(self._req, el_id) if el_id else None
+        return SocketElementHandle(self._req, el_id, self._page_id) if el_id else None
 
     def locator(self, selector: str) -> 'SocketLocator':
-        return SocketLocator(self._req, self._parent_id, selector, exact=self._exact)
+        return SocketLocator(self._req, self._parent_id, selector, exact=self._exact, page_id=self._page_id)
 
     def frame_locator(self, selector: str) -> 'SocketLocator':
-        return SocketLocator(self._req, self._parent_id, selector, exact=self._exact)
+        return SocketLocator(self._req, self._parent_id, selector, exact=self._exact, page_id=self._page_id)
 
     async def click(self, *args, **kwargs):
         await self._req.emit('locator_click', {'parent_id': self._parent_id, 'selector': self._selector, 'exact': self._exact, 'args': args, 'kwargs': kwargs})
 
     async def evaluate(self, script: str, *args, **kwargs):
-        return await self._req.emit('locator_evaluate', {'parent_id': self._parent_id, 'selector': self._selector, 'exact': self._exact, 'script': script, 'args': args, 'kwargs': kwargs})
+        result = await self._req.emit('locator_evaluate', {'parent_id': self._parent_id, 'selector': self._selector, 'exact': self._exact, 'script': script, 'args': args, 'kwargs': kwargs})
+        logger.debug(f"Evaluate result: {result}")
+        return result
 
     async def fill(self, text: str, timeout: float | None = None) -> None:
         await self._req.emit('locator_fill', {'parent_id': self._parent_id, 'selector': self._selector, 'exact': self._exact, 'text': text, 'timeout': timeout}) 
