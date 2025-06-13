@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import uuid
+import time
+import random
+import string
 from typing import Any, Literal, Awaitable
 
 import socketio
@@ -21,10 +24,17 @@ from browser_use.typing import (
 
 logger = logging.getLogger(__name__)
 
+# Generate a unique Python client ID
+def generate_python_client_id():
+    timestamp = int(time.time() * 1000)
+    random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=9))
+    return f"python_{timestamp}_{random_suffix}"
+
 # Helper for request/response pattern over socket.io
 class SocketRequestManager:
-    def __init__(self, sio: socketio.AsyncClient):
+    def __init__(self, sio: socketio.AsyncClient, browser_client_id: str):
         self.sio = sio
+        self._browser_client_id = browser_client_id
         self._futures = {}
         self.sio.on('response', self._on_response)
 
@@ -32,10 +42,26 @@ class SocketRequestManager:
         req_id = str(uuid.uuid4())
         fut = asyncio.get_event_loop().create_future()
         self._futures[req_id] = fut
-        await self.sio.emit(event, {**data, 'req_id': req_id})
+        
+        # Add browser client routing information if available
+        emit_data = {**data, 'req_id': req_id}
+        if self._browser_client_id:
+            emit_data['target_browser_client_id'] = self._browser_client_id
+            # Route through browser_command event for proper routing
+            await self.sio.emit('browser_command', {
+                'browser_client_id': self._browser_client_id,
+                'command': event,
+                'data': emit_data
+            })
+        else:
+            # Direct emission for backwards compatibility
+            await self.sio.emit(event, emit_data)
+        
         return await fut
 
     def _on_response(self, data):
+        if data.get('browser_client_id') != self._browser_client_id:
+            return
         logger.debug(f"Received response: {data}")
         req_id = data.get('req_id')
         if req_id and req_id in self._futures:
@@ -47,8 +73,12 @@ class SocketBrowser(AbstractBrowser):
     def __init__(self, config: BrowserConfig):
         super().__init__()
         self._config = config
-        self._sio = socketio.AsyncClient(logger=True, engineio_logger=True)
-        self._req = SocketRequestManager(self._sio)
+        self._python_client_id = generate_python_client_id()
+        self._sio = socketio.AsyncClient(
+            logger=True, 
+            engineio_logger=True
+        )
+        self._req = SocketRequestManager(self._sio, self._config.browser_client_id)
         self._contexts = []
         self._version = None
 
@@ -56,8 +86,23 @@ class SocketBrowser(AbstractBrowser):
         url = self._config.wss_url or self._config.cdp_url
         if not url:
             raise ValueError('SocketBrowser requires wss_url or cdp_url for socket.io endpoint')
-        logger.info(f"Connecting to {url}")
-        await self._sio.connect(url, transports=['websocket'])
+        logger.info(f"Connecting to {url} as Python client: {self._python_client_id}")
+        
+        try:
+            # Try connecting with auth data as a parameter
+            auth_data = {
+                'clientType': 'python',
+                'clientId': self._python_client_id
+            }
+            await self._sio.connect(url, transports=['websocket'], auth=auth_data)
+        except TypeError:
+            # Fallback: connect without auth and send auth data separately
+            await self._sio.connect(url, transports=['websocket'])
+            await self._sio.emit('client_auth', {
+                'clientType': 'python',
+                'clientId': self._python_client_id
+            })
+        
         self._version = await self._req.emit('get_version', {})
         logger.info(f"Browser version: {self._version}")
         return self
@@ -83,6 +128,14 @@ class SocketBrowser(AbstractBrowser):
     @property
     def version(self) -> str:
         return self._version or ''
+
+    @property
+    def python_client_id(self) -> str:
+        return self._python_client_id
+
+    def set_target_browser_client(self, browser_client_id: str):
+        """Set the target browser client for routing requests."""
+        self._req.set_target_browser_client(browser_client_id)
 
 
 class SocketContext(AbstractContext):

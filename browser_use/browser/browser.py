@@ -91,6 +91,7 @@ class BrowserConfig(BaseModel):
 
 	wss_url: str | None = None
 	cdp_url: str | None = None
+	browser_client_id: str | None = None
 
 	browser_class: Literal['chromium', 'firefox', 'webkit'] = 'chromium'
 	browser_binary_path: str | None = Field(
