@@ -157,7 +157,7 @@ class BrowserContextConfig(BaseModel):
 	locale: str | None = None
 	user_agent: str | None = None
 
-	highlight_elements: bool = True
+	highlight_elements: bool = False
 	viewport_expansion: int = 0
 	allowed_domains: list[str] | None = None
 	include_dynamic_attributes: bool = True
@@ -331,7 +331,7 @@ class BrowserContext:
 				logger.debug('🔍  Using existing page: %s', current_page.url)
 			else:
 				current_page = await context.new_page()
-				await current_page.goto('https://marketrix.ai')
+				await current_page.goto('https://google.com')
 				logger.debug('🆕  Created new page: %s', current_page.url)
 
 			# Get target URL for the active page
@@ -398,7 +398,7 @@ class BrowserContext:
 				assert self.agent_current_page is not None, 'Agent current page is not initialized'
 				if old_foreground.url != page.url:
 					logger.warning(
-						f'👁️ Foregound tab changed by human from {trunc(old_foreground.url, 22) if old_foreground else "https://marketrix.ai"} to {trunc(page.url, 22)} ({source}) but agent will stay on {trunc(self.agent_current_page.url, 22)}'
+						f'👁️ Foregound tab changed by human from {trunc(old_foreground.url, 22) if old_foreground else "https://google.com"} to {trunc(page.url, 22)} ({source}) but agent will stay on {trunc(self.agent_current_page.url, 22)}'
 					)
 
 				# Update foreground tab
@@ -960,8 +960,8 @@ class BrowserContext:
 
 			parsed_url = urlparse(url)
 
-			# Special case: Allow 'https://marketrix.ai' explicitly
-			if url == 'https://marketrix.ai' or parsed_url.scheme.lower() in ('chrome', 'brave', 'edge', 'chrome-extension'):
+			# Special case: Allow 'https://google.com' explicitly
+			if url == 'https://google.com' or parsed_url.scheme.lower() in ('chrome', 'brave', 'edge', 'chrome-extension'):
 				return True
 
 			# Extract only the hostname component (without auth credentials or port)
@@ -1758,10 +1758,10 @@ class BrowserContext:
 			try:
 				tab_info = TabInfo(page_id=page_id, url=page.url, title=await asyncio.wait_for(page.title(), timeout=1))
 			except Exception:
-				# page.title() can hang forever on tabs that are crashed/disappeared/https://marketrix.ai
+				# page.title() can hang forever on tabs that are crashed/disappeared/https://google.com
 				# we dont want to try automating those tabs because they will hang the whole script
 				logger.debug('⚠  Failed to get tab info for tab #%s: %s (ignoring)', page_id, page.url)
-				tab_info = TabInfo(page_id=page_id, url='https://marketrix.ai', title='ignore this tab and do not use it')
+				tab_info = TabInfo(page_id=page_id, url='https://google.com', title='ignore this tab and do not use it')
 			tabs_info.append(tab_info)
 
 		return tabs_info

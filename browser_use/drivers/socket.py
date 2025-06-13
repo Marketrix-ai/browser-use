@@ -70,8 +70,9 @@ class SocketBrowser(AbstractBrowser):
         await self._sio.disconnect()
 
     async def new_context(self, **kwargs):
-        ctx_id = await self._req.emit('new_context', kwargs)
-        ctx = SocketContext(self._req, ctx_id)
+        response = await self._req.emit('new_context', kwargs)
+        pages = [SocketPage(self._req, page['id']) for page in response['pages']]
+        ctx = SocketContext(self._req, response['contextId'], pages)
         self._contexts.append(ctx)
         return ctx
 
@@ -85,10 +86,10 @@ class SocketBrowser(AbstractBrowser):
 
 
 class SocketContext(AbstractContext):
-    def __init__(self, req: SocketRequestManager, ctx_id: str):
+    def __init__(self, req: SocketRequestManager, ctx_id: str, pages: list):
         self._req = req
         self._ctx_id = ctx_id
-        self._pages = []
+        self._pages = pages
 
     async def new_page(self):
         page_id = await self._req.emit('new_page', {'context_id': self._ctx_id})
@@ -364,31 +365,57 @@ class SocketElementHandle(AbstractElementHandle):
         self._page_id = page_id
 
     async def is_visible(self) -> bool:
-        return await self._req.emit('element_is_visible', {'element_id': self._el_id})
+        return await self._req.emit('element_is_visible', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+        })
 
     async def is_hidden(self) -> bool:
-        return await self._req.emit('element_is_hidden', {'element_id': self._el_id})
+        return await self._req.emit('element_is_hidden', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+        })
 
     async def bounding_box(self) -> dict | None:
-        return await self._req.emit('element_bounding_box', {'element_id': self._el_id})
+        return await self._req.emit('element_bounding_box', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+        })
 
     async def scroll_into_view_if_needed(self, timeout: int | float | None = None) -> None:
-        await self._req.emit('element_scroll_into_view_if_needed', {'element_id': self._el_id, 'timeout': timeout})
+        await self._req.emit('element_scroll_into_view_if_needed', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'timeout': timeout
+        })
 
     async def element_handle(self) -> 'SocketElementHandle':
         return self
 
     async def wait_for_element_state(self, state: Literal['disabled', 'editable', 'enabled', 'hidden', 'stable', 'visible'], timeout: int | float | None = None) -> None:
-        await self._req.emit('element_wait_for_element_state', {'element_id': self._el_id, 'state': state, 'timeout': timeout})
+        await self._req.emit('element_wait_for_element_state', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'state': state,
+            'timeout': timeout
+        })
 
     async def query_selector(self, selector: str) -> 'SocketElementHandle | None':
-        el_id = await self._req.emit('element_query_selector', {'element_id': self._el_id, 'selector': selector})
+        el_id = await self._req.emit('element_query_selector', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'selector': selector
+        })
         if not el_id:
             return None
         return SocketElementHandle(self._req, el_id, self._page_id)
 
     async def query_selector_all(self, selector: str) -> list['SocketElementHandle']:
-        el_ids = await self._req.emit('element_query_selector_all', {'element_id': self._el_id, 'selector': selector})
+        el_ids = await self._req.emit('element_query_selector_all', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'selector': selector
+        })
         return [SocketElementHandle(self._req, eid, self._page_id) for eid in el_ids]
 
     def on(self, event: str, handler) -> None:
@@ -406,21 +433,45 @@ class SocketElementHandle(AbstractElementHandle):
         })
 
     async def get_property(self, property_name: str):
-        return await self._req.emit('element_get_property', {'element_id': self._el_id, 'property_name': property_name})
+        return await self._req.emit('element_get_property', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'property_name': property_name
+        })
 
     async def evaluate(self, script: str, *args, **kwargs):
-        result = await self._req.emit('element_evaluate', {'element_id': self._el_id, 'script': script, 'args': args, 'kwargs': kwargs})
+        result = await self._req.emit('element_evaluate', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'script': script,
+            'args': args,
+            'kwargs': kwargs
+        })
         logger.debug(f"Evaluate result: {result}")
         return result
 
     async def type(self, text: str, delay: float = 0) -> None:
-        await self._req.emit('element_type', {'element_id': self._el_id, 'text': text, 'delay': delay})
+        await self._req.emit('element_type', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'text': text,
+            'delay': delay
+        })
 
     async def fill(self, text: str, timeout: float | None = None) -> None:
-        await self._req.emit('element_fill', {'element_id': self._el_id, 'text': text, 'timeout': timeout})
+        await self._req.emit('element_fill', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'text': text,
+            'timeout': timeout
+        })
 
     async def clear(self, timeout: float | None = None) -> None:
-        await self._req.emit('element_clear', {'element_id': self._el_id, 'timeout': timeout})
+        await self._req.emit('element_clear', {
+            'element_id': self._el_id,
+            'page_id': self._page_id,
+            'timeout': timeout
+        })
 
 
 class SocketLocator(AbstractLocator):
