@@ -339,6 +339,9 @@ class SocketPage(Page):
     def remove_listener(self, event: str, handler) -> None:
         pass  # Not implemented for socket
 
+    async def sheets_read_all(self) -> None:
+        await self._req.emit('sheets_read_all', {'page_id': self._page_id})
+
     @property
     def url(self) -> str:
         return self._url  # Or fetch via req if needed
