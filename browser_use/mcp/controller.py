@@ -12,6 +12,7 @@ from pydantic import Field, create_model
 
 from browser_use.agent.views import ActionResult
 from browser_use.controller.registry.service import Registry
+from browser_use.utils import is_new_tab_page
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class MCPToolWrapper:
 
 		if is_browser_tool:
 			# Browser tools should only be available when on a web page
-			page_filter = lambda page: page.url != 'about:blank'
+			page_filter = lambda page: not is_new_tab_page(page.url)
 
 		# Create wrapper function for the MCP tool
 		async def mcp_action_wrapper(**kwargs):
@@ -236,43 +237,6 @@ class MCPToolWrapper:
 			return base_type | None
 
 		return base_type
-
-
-class PlaywrightMCPIntegration:
-	"""Specific integration for Playwright MCP server."""
-
-	def __init__(self, registry: Registry, **playwright_args):
-		"""Initialize Playwright MCP integration.
-
-		Args:
-			registry: Browser-use action registry
-			**playwright_args: Arguments to pass to Playwright MCP server
-				- headless: bool = True
-				- browser: str = "chromium"
-				- viewport_size: str = "1280,720"
-				- etc.
-		"""
-		# Build MCP server arguments
-		mcp_args = ['@playwright/mcp@latest']
-
-		# Convert kwargs to command line arguments
-		for key, value in playwright_args.items():
-			arg_name = key.replace('_', '-')
-			if isinstance(value, bool):
-				if value:
-					mcp_args.append(f'--{arg_name}')
-			else:
-				mcp_args.extend([f'--{arg_name}', str(value)])
-
-		self.wrapper = MCPToolWrapper(registry=registry, mcp_command='npx', mcp_args=mcp_args)
-
-	async def connect(self):
-		"""Connect to Playwright MCP server."""
-		await self.wrapper.connect()
-
-	async def disconnect(self):
-		"""Disconnect from Playwright MCP server."""
-		await self.wrapper.disconnect()
 
 
 # Convenience function for easy integration
