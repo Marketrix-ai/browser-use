@@ -374,6 +374,11 @@ Only use this for specific queries for information retrieval from the page. Don'
 
 			page_html = page_html_result
 
+			try:
+				page_html = await page.content()
+			except Exception as e:
+				error_message = f"Couldn't extract page content: {str(e)}"
+				logger.error(error_message)
 			markdownify_func = partial(markdownify.markdownify, strip=strip)
 
 			try:
