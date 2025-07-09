@@ -5,6 +5,7 @@ Cloud sync service for sending events to the Browser Use cloud.
 import asyncio
 import json
 import logging
+import shutil
 
 import anyio
 import httpx
@@ -73,9 +74,14 @@ class CloudSync:
 
 			# Send event (batch format with direct BaseEvent serialization)
 			async with httpx.AsyncClient() as client:
+				# Serialize event and add device_id to all events
+				event_data = event.model_dump(mode='json')
+				if self.auth_client and self.auth_client.device_id:
+					event_data['device_id'] = self.auth_client.device_id
+
 				response = await client.post(
 					f'{self.base_url.rstrip("/")}/api/v1/events',
-					json={'events': [event.model_dump(mode='json')]},
+					json={'events': [event_data]},
 					headers=headers,
 					timeout=10.0,
 				)
@@ -91,7 +97,8 @@ class CloudSync:
 		except httpx.TimeoutException:
 			logger.warning(f'⚠️ Event send timed out after 10 seconds: {event}')
 		except httpx.ConnectError as e:
-			logger.warning(f'⚠️ Failed to connect to cloud service at {self.base_url}: {e}')
+			# logger.warning(f'⚠️ Failed to connect to cloud service at {self.base_url}: {e}')
+			pass
 		except httpx.HTTPError as e:
 			logger.warning(f'⚠️ HTTP error sending event {event}: {type(e).__name__}: {e}')
 		except Exception as e:
@@ -107,11 +114,11 @@ class CloudSync:
 				# Use frontend URL for user-facing links
 				frontend_url = CONFIG.BROWSER_USE_CLOUD_UI_URL or self.base_url.replace('//api.', '//cloud.')
 				session_url = f'{frontend_url.rstrip("/")}/agent/{agent_session_id}'
-
-				logger.info('\n\n' + '─' * 70)
+				terminal_width, _terminal_height = shutil.get_terminal_size((80, 20))
+				logger.info('─' * max(terminal_width - 40, 20) + '\n')
 				logger.info('🌐  View the details of this run in Browser Use Cloud:')
 				logger.info(f'    👉  {session_url}')
-				logger.info('─' * 70 + '\n')
+				logger.info('─' * max(terminal_width - 40, 20) + '\n\n')
 				return
 
 			# Otherwise run full authentication
@@ -162,11 +169,14 @@ class CloudSync:
 				if line.strip():
 					events.append(json.loads(line))
 
-			# Update user_id
+			# Update user_id and device_id
 			user_id = self.auth_client.user_id
+			device_id = self.auth_client.device_id
 			for event in events:
 				if 'user_id' in event:
 					event['user_id'] = user_id
+				# Add device_id to all events
+				event['device_id'] = device_id
 
 			# Write back
 			updated_content = '\n'.join(json.dumps(event) for event in events) + '\n'

@@ -46,6 +46,7 @@ class ChatGroq(BaseChatModel):
 
 	# Model params
 	temperature: float | None = None
+	service_tier: Literal['auto', 'on_demand', 'flex'] | None = None
 
 	# Client initialization parameters
 	api_key: str | None = None
@@ -96,6 +97,7 @@ class ChatGroq(BaseChatModel):
 					messages=groq_messages,
 					model=self.model,
 					temperature=self.temperature,
+					service_tier=self.service_tier,
 				)
 				usage = self._get_usage(chat_completion)
 				return ChatInvokeCompletion(
@@ -105,7 +107,6 @@ class ChatGroq(BaseChatModel):
 
 			else:
 				schema = output_format.model_json_schema()
-				schema['additionalProperties'] = False
 
 				# Return structured response
 				response = await self.get_client().chat.completions.create(
@@ -120,6 +121,7 @@ class ChatGroq(BaseChatModel):
 						),
 						type='json_schema',
 					),
+					service_tier=self.service_tier,
 				)
 
 				if not response.choices[0].message.content:
