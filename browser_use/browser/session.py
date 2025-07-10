@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import base64
 import json
 import logging
 import os
@@ -741,26 +740,43 @@ class BrowserSession(BaseModel):
 		except Exception:
 			pass
 
+		screenshot_b64 = None
+		cdp_session = None
 		try:
 			# Use a shorter timeout for screenshots to prevent semaphore starvation
 			# 10 seconds should be enough for most screenshots
-			screenshot_timeout = min(10000, self.browser_profile.default_timeout or 10000)
-			screenshot = await page.screenshot(
-				full_page=False,
-				# scale='css',
-				timeout=screenshot_timeout,
-				# clip=FloatRect(**clip) if clip else None,
-				animations='allow',
-				caret='initial',
+			# screenshot = await page.screenshot(
+			# 	full_page=False,
+			# 	# scale='css',
+			# 	timeout=screenshot_timeout,
+			# 	# clip=FloatRect(**clip) if clip else None,
+			# 	animations='allow',
+			# 	caret='initial',
+			#
+			cdp_session = await page.context.new_cdp_session(page)  # type: ignore
+			screenshot = await cdp_session.send(
+				'Page.captureScreenshot',
+				{
+					'captureBeyondViewport': False,
+					'fromSurface': True,
+					'format': 'png',
+					# 'clip': clip,
+				},
 			)
+			screenshot_b64 = screenshot['data']
 		except Exception as err:
 			# Don't reset browser on timeout - this can cause semaphore deadlocks
 			# Just re-raise the error and let the retry decorator handle it
 			if 'timeout' in str(err).lower():
 				self.logger.warning(f'⏱️ Screenshot timed out on page {page.url}: {err}')
 			raise err
+		finally:
+			try:
+				assert cdp_session
+				await cdp_session.detach()
+			except Exception:
+				pass
 		assert await page.evaluate('() => true'), 'Page is not usable after screenshot!'
-		screenshot_b64 = base64.b64encode(screenshot).decode('utf-8')
 		assert screenshot_b64, 'Playwright page.screenshot() returned empty base64'
 		return screenshot_b64
 
@@ -1586,7 +1602,11 @@ class BrowserSession(BaseModel):
 			if is_new_tab_page(page.url):
 				# Navigate to about:blank if we're on chrome://new-tab-page to avoid security restrictions
 				if page.url.startswith('chrome://new-tab-page'):
-					await page.goto('about:blank')
+					try:
+						# can raise exception if nav is interrupted by another agent nav or human, harmless but annoying
+						await page.goto('about:blank', wait_until='domcontentloaded', timeout=1000)
+					except Exception:
+						pass
 				await self._show_dvd_screensaver_loading_animation(page)
 
 		page = page or (await self.browser_context.new_page())
@@ -2124,10 +2144,20 @@ class BrowserSession(BaseModel):
 				title = await self._get_page_title(page)
 				tab_info = TabInfo(page_id=page_id, url=page.url, title=title)
 			except Exception:
-				# page.title() can hang forever on tabs that are crashed/disappeared/new tab pages
-				# we dont want to try automating those tabs because they will hang the whole script
-				self.logger.debug(f'⚠️ Failed to get tab info for tab #{page_id}: {_log_pretty_url(page.url)} (ignoring)')
-				tab_info = TabInfo(page_id=page_id, url='about:blank', title='ignore this tab and do not use it')
+				# page.title() can hang forever on tabs that are crashed/disappeared/about:blank
+				# but we should preserve the real URL and not mislead the LLM about tab availability
+				self.logger.debug(
+					f'⚠️ Failed to get tab info for tab #{page_id}: {_log_pretty_url(page.url)} (using fallback title)'
+				)
+
+				# Only mark as unusable if it's actually about:blank, otherwise preserve the real URL
+				if page.url == 'about:blank':
+					tab_info = TabInfo(page_id=page_id, url='about:blank', title='ignore this tab and do not use it')
+				else:
+					# Preserve the real URL and use a descriptive fallback title
+					fallback_title = '(title unavailable)'
+					tab_info = TabInfo(page_id=page_id, url=page.url, title=fallback_title)
+
 			tabs_info.append(tab_info)
 
 		return tabs_info
@@ -2725,13 +2755,6 @@ class BrowserSession(BaseModel):
 			raise BrowserError(f'Navigation to non-allowed URL: {normalized_url}')
 
 		page = await self.get_current_page()
-		try:
-			await asyncio.wait_for(page.evaluate('1'), timeout=1)
-		except Exception as e:
-			# new tab to recover
-			self.logger.warning(f'🚨 Page {_log_pretty_url(normalized_url)} is unresponsive, creating new tab...')
-			page = await self.create_new_tab(normalized_url)
-			return
 
 		try:
 			await asyncio.wait_for(page.goto(normalized_url), timeout=0.1)
@@ -2924,7 +2947,7 @@ class BrowserSession(BaseModel):
 
 		return self._cached_browser_state_summary
 
-	@observe_debug(name='get_minimal_state_summary')
+	@observe_debug(name='get_minimal_state_summary', ignore_output=True)
 	@require_initialization
 	@time_execution_async('--get_minimal_state_summary')
 	async def get_minimal_state_summary(self) -> BrowserStateSummary:
@@ -2972,17 +2995,17 @@ class BrowserSession(BaseModel):
 			browser_errors=[f'Page state retrieval failed, minimal recovery applied for {url}'],
 		)
 
-	@observe_debug(name='get_updated_state')
+	@observe_debug(name='get_updated_state', ignore_output=True)
 	async def _get_updated_state(self, focus_element: int = -1) -> BrowserStateSummary:
 		"""Update and return state."""
 
+		# Check if current page is still valid, if not switch to another available page
 		page = await self.get_current_page()
 
-		# Check if current page is still valid, if not switch to another available page
 		try:
 			# Test if page is still accessible
 			# NOTE: This also happens on invalid urls like www.sadfdsafdssdafd.com
-			await asyncio.wait_for(page.evaluate('1'), timeout=1.0)
+			await asyncio.wait_for(page.evaluate('1'), timeout=2.5)
 		except Exception as e:
 			self.logger.debug(f'👋 Current page is not accessible: {type(e).__name__}: {e}')
 			raise BrowserError('Page is not accessible')
@@ -4008,101 +4031,104 @@ class BrowserSession(BaseModel):
 
 		# all in one JS function for speed, we want as few roundtrip CDP calls as possible
 		# between opening the tab and showing the animation
-		await page.evaluate(
-			"""(browser_session_label) => {
-			const animated_title = `Starting agent ${browser_session_label}...`;
-			if (document.title === animated_title) {
-				return;      // already run on this tab, dont run again
-			}
-			document.title = animated_title;
-
-			// Create the main overlay
-			const loadingOverlay = document.createElement('div');
-			loadingOverlay.id = 'pretty-loading-animation';
-			loadingOverlay.style.position = 'fixed';
-			loadingOverlay.style.top = '0';
-			loadingOverlay.style.left = '0';
-			loadingOverlay.style.width = '100vw';
-			loadingOverlay.style.height = '100vh';
-			loadingOverlay.style.background = '#000';
-			loadingOverlay.style.zIndex = '99999';
-			loadingOverlay.style.overflow = 'hidden';
-
-			// Create the image element
-			const img = document.createElement('img');
-			img.src = 'https://cf.browser-use.com/logo.svg';
-			img.alt = 'Browser-Use';
-			img.style.width = '200px';
-			img.style.height = 'auto';
-			img.style.position = 'absolute';
-			img.style.left = '0px';
-			img.style.top = '0px';
-			img.style.zIndex = '2';
-			img.style.opacity = '0.8';
-
-			loadingOverlay.appendChild(img);
-			document.body.appendChild(loadingOverlay);
-
-			// DVD screensaver bounce logic
-			let x = Math.random() * (window.innerWidth - 300);
-			let y = Math.random() * (window.innerHeight - 300);
-			let dx = 1.2 + Math.random() * 0.4; // px per frame
-			let dy = 1.2 + Math.random() * 0.4;
-			// Randomize direction
-			if (Math.random() > 0.5) dx = -dx;
-			if (Math.random() > 0.5) dy = -dy;
-
-			function animate() {
-				const imgWidth = img.offsetWidth || 300;
-				const imgHeight = img.offsetHeight || 300;
-				x += dx;
-				y += dy;
-
-				if (x <= 0) {
-					x = 0;
-					dx = Math.abs(dx);
-				} else if (x + imgWidth >= window.innerWidth) {
-					x = window.innerWidth - imgWidth;
-					dx = -Math.abs(dx);
+		try:
+			await page.evaluate(
+				"""(browser_session_label) => {
+				const animated_title = `Starting agent ${browser_session_label}...`;
+				if (document.title === animated_title) {
+					return;      // already run on this tab, dont run again
 				}
-				if (y <= 0) {
-					y = 0;
-					dy = Math.abs(dy);
-				} else if (y + imgHeight >= window.innerHeight) {
-					y = window.innerHeight - imgHeight;
-					dy = -Math.abs(dy);
+				document.title = animated_title;
+
+				// Create the main overlay
+				const loadingOverlay = document.createElement('div');
+				loadingOverlay.id = 'pretty-loading-animation';
+				loadingOverlay.style.position = 'fixed';
+				loadingOverlay.style.top = '0';
+				loadingOverlay.style.left = '0';
+				loadingOverlay.style.width = '100vw';
+				loadingOverlay.style.height = '100vh';
+				loadingOverlay.style.background = '#000';
+				loadingOverlay.style.zIndex = '99999';
+				loadingOverlay.style.overflow = 'hidden';
+
+				// Create the image element
+				const img = document.createElement('img');
+				img.src = 'https://cf.browser-use.com/logo.svg';
+				img.alt = 'Browser-Use';
+				img.style.width = '200px';
+				img.style.height = 'auto';
+				img.style.position = 'absolute';
+				img.style.left = '0px';
+				img.style.top = '0px';
+				img.style.zIndex = '2';
+				img.style.opacity = '0.8';
+
+				loadingOverlay.appendChild(img);
+				document.body.appendChild(loadingOverlay);
+
+				// DVD screensaver bounce logic
+				let x = Math.random() * (window.innerWidth - 300);
+				let y = Math.random() * (window.innerHeight - 300);
+				let dx = 1.2 + Math.random() * 0.4; // px per frame
+				let dy = 1.2 + Math.random() * 0.4;
+				// Randomize direction
+				if (Math.random() > 0.5) dx = -dx;
+				if (Math.random() > 0.5) dy = -dy;
+
+				function animate() {
+					const imgWidth = img.offsetWidth || 300;
+					const imgHeight = img.offsetHeight || 300;
+					x += dx;
+					y += dy;
+
+					if (x <= 0) {
+						x = 0;
+						dx = Math.abs(dx);
+					} else if (x + imgWidth >= window.innerWidth) {
+						x = window.innerWidth - imgWidth;
+						dx = -Math.abs(dx);
+					}
+					if (y <= 0) {
+						y = 0;
+						dy = Math.abs(dy);
+					} else if (y + imgHeight >= window.innerHeight) {
+						y = window.innerHeight - imgHeight;
+						dy = -Math.abs(dy);
+					}
+
+					img.style.left = `${x}px`;
+					img.style.top = `${y}px`;
+
+					requestAnimationFrame(animate);
 				}
+				animate();
 
-				img.style.left = `${x}px`;
-				img.style.top = `${y}px`;
+				// Responsive: update bounds on resize
+				window.addEventListener('resize', () => {
+					x = Math.min(x, window.innerWidth - img.offsetWidth);
+					y = Math.min(y, window.innerHeight - img.offsetHeight);
+				});
 
-				requestAnimationFrame(animate);
-			}
-			animate();
+				// Add a little CSS for smoothness
+				const style = document.createElement('style');
+				style.textContent = `
+					#pretty-loading-animation {
+						/*backdrop-filter: blur(2px) brightness(0.9);*/
+					}
+					#pretty-loading-animation img {
+						user-select: none;
+						pointer-events: none;
+					}
+				`;
+				document.head.appendChild(style);
+			}""",
+				str(self.id)[-4:],
+			)
+		except Exception as e:
+			self.logger.debug(f'❌ Failed to show 📀 DVD loading animation: {type(e).__name__}: {e}')
 
-			// Responsive: update bounds on resize
-			window.addEventListener('resize', () => {
-				x = Math.min(x, window.innerWidth - img.offsetWidth);
-				y = Math.min(y, window.innerHeight - img.offsetHeight);
-			});
-
-			// Add a little CSS for smoothness
-			const style = document.createElement('style');
-			style.textContent = `
-				#pretty-loading-animation {
-					/*backdrop-filter: blur(2px) brightness(0.9);*/
-				}
-				#pretty-loading-animation img {
-					user-select: none;
-					pointer-events: none;
-				}
-			`;
-			document.head.appendChild(style);
-		}""",
-			str(self.id)[-4:],
-		)
-
-	@observe_debug(name='get_state_summary_with_fallback')
+	@observe_debug(name='get_state_summary_with_fallback', ignore_output=True)
 	@require_initialization
 	@time_execution_async('--get_state_summary_with_fallback')
 	async def get_state_summary_with_fallback(self, cache_clickable_elements_hashes: bool = True) -> BrowserStateSummary:
