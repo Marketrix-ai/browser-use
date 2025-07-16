@@ -91,7 +91,7 @@ class DomService:
 		#       relationship between the DOM elements.
 		debug_mode = self.logger.getEffectiveLevel() == logging.DEBUG
 		args = {
-			'doHighlightElements': highlight_elements,
+			'doHighlightElements': False,
 			'focusHighlightIndex': focus_element,
 			'viewportExpansion': viewport_expansion,
 			'debugMode': debug_mode,
