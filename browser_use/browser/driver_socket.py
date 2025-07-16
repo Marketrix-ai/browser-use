@@ -126,12 +126,13 @@ class SocketContext(GenericBrowserContext):
     async def _on_binding_call(self, sid, data):
         name   = data['name']
         req_id = data['req_id']
-        args   = data['args']
+        args = data.get('args') if 'args' in data else None
         if data.get('page_id'):
             page_obj = next((p for p in self._pages if getattr(p, '_page_id', None) == data['page_id']), None)
-            if page_obj is not None:
+            if page_obj is not None and args:
                 args['page'] = page_obj
         try:
+            assert args
             result = await self.maybe_await(self._bindings[name](args))
             await self._req.sio.emit('binding_result', {'req_id': req_id, 'result': result, 'tabId': data.get('tabId')}, room=sid)
         except Exception as e:
