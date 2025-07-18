@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Generic, TypeVar
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -84,19 +85,31 @@ def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 	if logger is None:
 		logger = logging.getLogger(__name__)
 
-	if 'success' in response.current_state.evaluation_previous_goal.lower():
-		emoji = '👍'
-	elif 'failure' in response.current_state.evaluation_previous_goal.lower():
-		emoji = '⚠️'
-	else:
-		emoji = '❔'
-
 	# Only log thinking if it's present
 	if response.current_state.thinking:
 		logger.info(f'💡 Thinking:\n{response.current_state.thinking}')
-	logger.info(f'{emoji} Eval: {response.current_state.evaluation_previous_goal}')
-	logger.info(f'🧠 Memory: {response.current_state.memory}')
-	logger.info(f'🎯 Next goal: {response.current_state.next_goal}\n')
+
+	# Only log evaluation if it's not empty
+	eval_goal = response.current_state.evaluation_previous_goal
+	if eval_goal:
+		if 'success' in eval_goal.lower():
+			emoji = '👍'
+		elif 'failure' in eval_goal.lower():
+			emoji = '⚠️'
+		else:
+			emoji = '❔'
+		logger.info(f'{emoji} Eval: {eval_goal}')
+
+	# Always log memory if present
+	if response.current_state.memory:
+		logger.info(f'🧠 Memory: {response.current_state.memory}')
+
+	# Only log next goal if it's not empty
+	next_goal = response.current_state.next_goal
+	if next_goal:
+		logger.info(f'🎯 Next goal: {next_goal}\n')
+	else:
+		logger.info('')  # Add empty line for spacing
 
 
 Context = TypeVar('Context')
@@ -153,6 +166,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		include_attributes: list[str] = DEFAULT_INCLUDE_ATTRIBUTES,
 		max_actions_per_step: int = 10,
 		use_thinking: bool = True,
+		flash_mode: bool = False,
 		max_history_items: int = 40,
 		images_per_step: int = 1,
 		page_extraction_llm: BaseChatModel | None = None,
@@ -200,6 +214,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.task_id: str = self.id
 		self.session_id: str = uuid7str()
 
+		# Initialize available file paths as direct attribute
+		self.available_file_paths = available_file_paths
+
 		# Create instance-specific logger
 		self._logger = logging.getLogger(f'browser_use.Agent[{self.task_id[-3:]}]')
 
@@ -229,10 +246,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			validate_output=validate_output,
 			message_context=message_context,
 			generate_gif=generate_gif,
-			available_file_paths=available_file_paths,
 			include_attributes=include_attributes,
 			max_actions_per_step=max_actions_per_step,
 			use_thinking=use_thinking,
+			flash_mode=flash_mode,
 			max_history_items=max_history_items,
 			images_per_step=images_per_step,
 			page_extraction_llm=page_extraction_llm,
@@ -299,9 +316,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				override_system_message=override_system_message,
 				extend_system_message=extend_system_message,
 				use_thinking=self.settings.use_thinking,
+				flash_mode=self.settings.flash_mode,
 			).get_system_message(),
 			file_system=self.file_system,
-			available_file_paths=self.settings.available_file_paths,
 			state=self.state.message_manager_state,
 			use_thinking=self.settings.use_thinking,
 			# Settings that were previously in MessageManagerSettings
@@ -422,8 +439,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Event bus with WAL persistence
 		# Default to ~/.config/browseruse/events/{agent_session_id}.jsonl
-		wal_path = CONFIG.BROWSER_USE_CONFIG_DIR / 'events' / f'{self.session_id}.jsonl'
-		self.eventbus = EventBus(name=f'Agent_{str(self.id)[-4:]}', wal_path=wal_path)
+		# wal_path = CONFIG.BROWSER_USE_CONFIG_DIR / 'events' / f'{self.session_id}.jsonl'
+		self.eventbus = EventBus(name=f'Agent_{str(self.id)[-4:]}')
 
 		# Cloud sync service
 		self.enable_cloud_sync = CONFIG.BROWSER_USE_CLOUD_SYNC
@@ -471,21 +488,37 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 		return self.browser_session.browser_profile
 
+	async def _check_and_update_downloads(self, context: str = '') -> None:
+		"""Check for new downloads and update available file paths."""
+		if not self.has_downloads_path:
+			return
+
+		assert self.browser_session is not None, 'BrowserSession is not set up'
+
+		try:
+			current_downloads = self.browser_session.downloaded_files
+			if current_downloads != self._last_known_downloads:
+				self._update_available_file_paths(current_downloads)
+				self._last_known_downloads = current_downloads
+				if context:
+					self.logger.debug(f'📁 {context}: Updated available files')
+		except Exception as e:
+			error_context = f' {context}' if context else ''
+			self.logger.debug(f'📁 Failed to check for downloads{error_context}: {type(e).__name__}: {e}')
+
 	def _update_available_file_paths(self, downloads: list[str]) -> None:
 		"""Update available_file_paths with downloaded files."""
 		if not self.has_downloads_path:
 			return
 
-		current_files = set(self.settings.available_file_paths or [])
+		current_files = set(self.available_file_paths or [])
 		new_files = set(downloads) - current_files
 
 		if new_files:
-			self.settings.available_file_paths = list(current_files | new_files)
-			# Update message manager with new file paths
-			self._message_manager.available_file_paths = self.settings.available_file_paths
+			self.available_file_paths = list(current_files | new_files)
 
 			self.logger.info(
-				f'📁 Added {len(new_files)} downloaded files to available_file_paths (total: {len(self.settings.available_file_paths)} files)'
+				f'📁 Added {len(new_files)} downloaded files to available_file_paths (total: {len(self.available_file_paths)} files)'
 			)
 			for file_path in new_files:
 				self.logger.info(f'📄 New file available: {file_path}')
@@ -585,14 +618,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Initially only include actions with no filters
 		self.ActionModel = self.controller.registry.create_action_model()
 		# Create output model with the dynamic actions
-		if self.settings.use_thinking:
+		if self.settings.flash_mode:
+			self.AgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.ActionModel)
+		elif self.settings.use_thinking:
 			self.AgentOutput = AgentOutput.type_with_custom_actions(self.ActionModel)
 		else:
 			self.AgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.ActionModel)
 
 		# used to force the done action when max_steps is reached
 		self.DoneActionModel = self.controller.registry.create_action_model(include_actions=['done'])
-		if self.settings.use_thinking:
+		if self.settings.flash_mode:
+			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.DoneActionModel)
+		elif self.settings.use_thinking:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions(self.DoneActionModel)
 		else:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
@@ -615,7 +652,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			# self.logger.debug('Agent paused after getting state')
 			raise InterruptedError
 
-	@observe_debug(name='get_browser_state_with_recovery')
+	@observe_debug(ignore_input=True, ignore_output=True, name='get_browser_state_with_recovery')
 	async def _get_browser_state_with_recovery(self, cache_clickable_elements_hashes: bool = True) -> BrowserStateSummary:
 		"""Get browser state with multiple fallback strategies for error recovery"""
 
@@ -670,6 +707,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		browser_state_summary = await self._get_browser_state_with_recovery(cache_clickable_elements_hashes=True)
 		current_page = await self.browser_session.get_current_page()
 
+		# Check for new downloads after getting browser state (catches PDF auto-downloads and previous step downloads)
+		await self._check_and_update_downloads(f'Step {self.state.n_steps + 1}: after getting browser state')
+
 		self._log_step_context(current_page, browser_state_summary)
 		await self._raise_if_stopped_or_paused()
 
@@ -695,6 +735,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			page_filtered_actions=page_filtered_actions if page_filtered_actions else None,
 			sensitive_data=self.sensitive_data,
 			agent_history_list=self.state.history,  # Pass AgentHistoryList for screenshots
+			available_file_paths=self.available_file_paths,  # Always pass current available_file_paths
 		)
 
 		await self._handle_final_step(step_info)
@@ -738,14 +779,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 
 		# Check for new downloads after executing actions
-		if self.has_downloads_path:
-			try:
-				current_downloads = self.browser_session.downloaded_files
-				if current_downloads != self._last_known_downloads:
-					self._update_available_file_paths(current_downloads)
-					self._last_known_downloads = current_downloads
-			except Exception as e:
-				self.logger.debug(f'📁 Failed to check for new downloads: {type(e).__name__}: {e}')
+		await self._check_and_update_downloads('after executing actions')
 
 		self.state.consecutive_failures = 0
 		self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures reset to: {self.state.consecutive_failures}')
@@ -1083,6 +1117,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				use_validation=self.settings.validate_output,
 				version=self.version,
 				source=self.source,
+				cdp_url=urlparse(self.browser_session.cdp_url).hostname
+				if self.browser_session and self.browser_session.cdp_url
+				else None,
 				action_errors=self.state.history.errors(),
 				action_history=action_history_data,
 				urls_visited=self.state.history.urls(),
@@ -1330,7 +1367,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			await self.close()
 
-	@observe_debug()
+	@observe_debug(ignore_input=True, ignore_output=True)
 	@time_execution_async('--multi_act')
 	async def multi_act(
 		self,
@@ -1401,7 +1438,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					file_system=self.file_system,
 					page_extraction_llm=self.settings.page_extraction_llm,
 					sensitive_data=self.sensitive_data,
-					available_file_paths=self.settings.available_file_paths,
+					available_file_paths=self.available_file_paths,
 					context=self.context,
 				)
 
@@ -1660,14 +1697,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Create new action model with current page's filtered actions
 		self.ActionModel = self.controller.registry.create_action_model(page=page)
 		# Update output model with the new actions
-		if self.settings.use_thinking:
+		if self.settings.flash_mode:
+			self.AgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.ActionModel)
+		elif self.settings.use_thinking:
 			self.AgentOutput = AgentOutput.type_with_custom_actions(self.ActionModel)
 		else:
 			self.AgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.ActionModel)
 
 		# Update done action model too
 		self.DoneActionModel = self.controller.registry.create_action_model(include_actions=['done'], page=page)
-		if self.settings.use_thinking:
+		if self.settings.flash_mode:
+			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_flash_mode(self.DoneActionModel)
+		elif self.settings.use_thinking:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions(self.DoneActionModel)
 		else:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
