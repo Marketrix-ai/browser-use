@@ -960,7 +960,6 @@ Explain the content of the page and that the requested information is not availa
 
 			await select_cell_or_range(cell_or_range=cell_or_range, page=page)
 
-			# simulate paste event from clipboard with TSV content
 			await page.evaluate(f"""
 				const clipboardData = new DataTransfer();
 				clipboardData.setData('text/plain', `{new_contents_tsv}`);

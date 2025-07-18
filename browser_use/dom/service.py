@@ -37,7 +37,7 @@ class DomService:
 	@time_execution_async('--get_clickable_elements')
 	async def get_clickable_elements(
 		self,
-		highlight_elements: bool = True,
+		highlight_elements: bool = False,
 		focus_element: int = -1,
 		viewport_expansion: int = 0,
 	) -> DOMState:
@@ -91,7 +91,7 @@ class DomService:
 		#       relationship between the DOM elements.
 		debug_mode = self.logger.getEffectiveLevel() == logging.DEBUG
 		args = {
-			'doHighlightElements': highlight_elements,
+			'doHighlightElements': False,
 			'focusHighlightIndex': focus_element,
 			'viewportExpansion': viewport_expansion,
 			'debugMode': debug_mode,
