@@ -81,11 +81,12 @@ async def browser_session():
 		browser_profile=BrowserProfile(
 			headless=True,
 			user_data_dir=None,
+			keep_alive=True,
 		)
 	)
 	await browser_session.start()
 	yield browser_session
-	await browser_session.stop()
+	await browser_session.kill()
 
 
 @pytest.fixture(scope='function')
@@ -287,8 +288,9 @@ class TestControllerIntegration:
 			click_element_by_index: ClickElementAction | None = None
 
 		# This should fail since the element doesn't exist
-		result = await controller.act(ClickActionModel(**invalid_action), browser_session)
-		assert result.success is False
+		result: ActionResult = await controller.act(ClickActionModel(**invalid_action), browser_session)
+
+		assert result.error is not None
 
 	async def test_wait_action(self, controller, browser_session):
 		"""Test that the wait action correctly waits for the specified duration."""

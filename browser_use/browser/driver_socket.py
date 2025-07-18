@@ -71,6 +71,7 @@ class SocketBrowser(GenericBrowser):
 
     async def new_context(self, **kwargs):
         response = await self._req.emit('new_context', kwargs)
+        pages = [SocketPage(self._req, page['id'])
         pages = [SocketPage(self._req, page['id'], page["url"])
                  for page in response['pages']]
         ctx = SocketContext(self._req, response['contextId'], pages)
@@ -151,6 +152,8 @@ class SocketContext(GenericBrowserContext):
         raise NotImplementedError('default_timeout unsupported in SocketContext')
 
     async def new_page(self):
+        page_id = await self._req.emit('new_page', {'context_id': self._ctx_id})
+        page = SocketPage(self._req, page_id)
         result = await self._req.emit('new_page', {'context_id': self._ctx_id})
         page = SocketPage(self._req, result['pageId'], result['url'])
         self._pages.append(page)
