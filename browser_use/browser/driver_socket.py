@@ -95,6 +95,9 @@ class SocketContext(GenericBrowserContext):
         self._ctx_id = ctx_id
         self._pages = pages
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._bindings = {}
+        # Register the socketio event handler
+        self._req.sio.on('binding_call', self._on_binding_call)
 
     async def new_cdp_session(self, **kwargs):
         raise NotImplementedError(
@@ -104,9 +107,36 @@ class SocketContext(GenericBrowserContext):
     def browser(self):
         return None  # Not implemented for socket
 
-    async def expose_binding(self, name: str, binding: Any) -> None:
-        # raise NotImplementedError('expose_binding unsupported in SocketContext')
-        pass
+    async def expose_binding(self, name: str, callback: Any) -> None:
+        # 1. Remember the callback
+        self._bindings[name] = callback
+        # 2. Ask the extension to inject a JS stub, not the python code
+        await self._req.emit('expose_binding', {
+            'context_id': self._ctx_id,
+            'name': name,
+        })
+
+    @staticmethod
+    async def maybe_await(val):
+        import inspect
+        if inspect.isawaitable(val):
+            return await val
+        return val
+
+    async def _on_binding_call(self, sid, data):
+        name   = data['name']
+        req_id = data['req_id']
+        args = data.get('args') if 'args' in data else None
+        if data.get('page_id'):
+            page_obj = next((p for p in self._pages if getattr(p, '_page_id', None) == data['page_id']), None)
+            if page_obj is not None and args:
+                args['page'] = page_obj
+        try:
+            assert args
+            result = await self.maybe_await(self._bindings[name](args))
+            await self._req.sio.emit('binding_result', {'req_id': req_id, 'result': result, 'tabId': data.get('tabId')}, room=sid)
+        except Exception as e:
+            await self._req.sio.emit('binding_result', {'req_id': req_id, 'error': str(e), 'tabId': data.get('tabId')}, room=sid)
 
     async def storage_state(self, **kwargs) -> dict:
         raise NotImplementedError('storage_state unsupported in SocketContext')
